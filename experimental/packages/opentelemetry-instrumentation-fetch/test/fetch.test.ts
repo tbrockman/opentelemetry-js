@@ -52,7 +52,7 @@ import {
 } from '@opentelemetry/semantic-conventions';
 
 class DummySpanExporter implements tracing.SpanExporter {
-  export(spans: any) {}
+  export(spans: any) { }
 
   shutdown() {
     return Promise.resolve();
@@ -63,15 +63,17 @@ class DummySpanExporter implements tracing.SpanExporter {
   }
 }
 
-const getData = (url: string, method?: string) => {
-  return fetch(url, {
+const makeRequest = (url: string, method?: string, requestInit?: RequestInit) => {
+  const request = new Request(url, {
     method: method || 'GET',
     headers: {
       foo: 'bar',
       Accept: 'application/json',
       'Content-Type': 'application/json',
     },
-  });
+    ...requestInit,
+  })
+  return fetch(request);
 };
 
 const CUSTOM_ATTRIBUTE_KEY = 'span kind';
@@ -119,7 +121,7 @@ function createMainResource(resource = {}): PerformanceResourceTiming {
 
 function createFakePerformanceObs(url: string) {
   class FakePerfObs implements PerformanceObserver {
-    constructor(private readonly cb: PerformanceObserverCallback) {}
+    constructor(private readonly cb: PerformanceObserverCallback) { }
     observe() {
       const absoluteUrl = url.startsWith('http') ? url : location.origin + url;
       const resources: PerformanceObserverEntryList = {
@@ -138,7 +140,7 @@ function createFakePerformanceObs(url: string) {
       };
       this.cb(resources, this);
     }
-    disconnect() {}
+    disconnect() { }
     takeRecords(): PerformanceEntryList {
       return [];
     }
@@ -186,7 +188,9 @@ describe('fetch', () => {
     config: FetchInstrumentationConfig,
     method?: string,
     disablePerfObserver?: boolean,
-    disableGetEntries?: boolean
+    disableGetEntries?: boolean,
+    realFetch?: boolean,
+    requestInit?: RequestInit
   ) => {
     sinon.useFakeTimers();
 
@@ -225,7 +229,11 @@ describe('fetch', () => {
       });
     }
 
-    sinon.stub(window, 'fetch').callsFake(fakeFetch as any);
+    if (!realFetch) {
+      sinon.stub(window, 'fetch').callsFake(fakeFetch as any);
+    } else {
+      sinon.stub(window, 'fetch').callThrough();
+    }
 
     const resources: PerformanceResourceTiming[] = [];
     resources.push(
@@ -288,7 +296,8 @@ describe('fetch', () => {
       async () => {
         fakeNow = 0;
         try {
-          const responsePromise = getData(fileUrl, method);
+          console.log('here with:', requestInit || fileUrl)
+          const responsePromise = makeRequest(fileUrl, method, requestInit);
           fakeNow = 300;
           const response = await responsePromise;
 
@@ -296,14 +305,19 @@ describe('fetch', () => {
           // awaiting for the span to end
           if (readSpy.callCount > 0) await spanEnded;
 
-          // this is a bit tricky as the only way to get all request headers from
-          // fetch is to use json()
-          lastResponse = await response.json();
-          const headers: { [key: string]: string } = {};
-          Object.keys(lastResponse.headers).forEach(key => {
-            headers[key.toLowerCase()] = lastResponse.headers[key];
-          });
-          lastResponse.headers = headers;
+          if (response.status != 200) {
+            await response.text();
+            lastResponse = { headers: {} }
+          } else {
+            // this is a bit tricky as the only way to get all request headers from
+            // fetch is to use json()
+            lastResponse = await response.json();
+            const headers: { [key: string]: string } = {};
+            Object.keys(lastResponse.headers).forEach(key => {
+              headers[key.toLowerCase()] = lastResponse.headers[key];
+            });
+            lastResponse.headers = headers;
+          }
         } catch (e) {
           lastResponse = undefined;
         }
@@ -499,7 +513,7 @@ describe('fetch', () => {
 
     it('should set trace headers with a request object', () => {
       const r = new Request('url');
-      window.fetch(r).catch(() => {});
+      window.fetch(r).catch(() => { });
       assert.ok(typeof r.headers.get(X_B3_TRACE_ID) === 'string');
     });
 
@@ -507,7 +521,7 @@ describe('fetch', () => {
       const r = new Request('url', {
         headers: new Headers({ foo: 'bar' }),
       });
-      window.fetch(r).catch(() => {});
+      window.fetch(r).catch(() => { });
       assert.ok(r.headers.get('foo') === 'bar');
     });
 
@@ -516,7 +530,7 @@ describe('fetch', () => {
       const init = {
         headers: new Headers({ foo: 'bar' }),
       };
-      window.fetch(url, init).catch(() => {});
+      window.fetch(url, init).catch(() => { });
       assert.ok(init.headers.get('foo') === 'bar');
     });
 
@@ -525,7 +539,7 @@ describe('fetch', () => {
       const init = {
         headers: { foo: 'bar' },
       };
-      window.fetch(url, init).catch(() => {});
+      window.fetch(url, init).catch(() => { });
       assert.ok(init.headers['foo'] === 'bar');
     });
 
@@ -536,7 +550,7 @@ describe('fetch', () => {
       };
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore variable init not of RequestInit type
-      window.fetch(url, init).catch(() => {});
+      window.fetch(url, init).catch(() => { });
       assert.ok(init.headers.get('foo') === 'bar');
     });
 
@@ -797,6 +811,44 @@ describe('fetch', () => {
         span.parentSpanId,
         rootSpan.spanContext().spanId,
         'parent span is not root span'
+      );
+    });
+  });
+
+  describe.only('when request is not mocked with POST with a body', () => {
+
+    beforeEach(async () => {
+      const url = 'http://127.0.0.1:9876/test'
+      const body = JSON.stringify({ foo: 'bar' })
+      const init = {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body,
+      }
+
+      await prepareData(url, {}, 'POST', false, false, true, init);
+      console.log('data prepared?')
+    });
+
+    afterEach(() => {
+      clearData();
+    });
+
+    it('should create a span with correct root span', () => {
+      console.log('creating root span?')
+      const span: tracing.ReadableSpan = exportSpy.args[1][0][0];
+      console.log('here???')
+      assert.strictEqual(
+        span.parentSpanId,
+        rootSpan.spanContext().spanId,
+        'parent span is not root span'
+      );
+      assert.strictEqual(
+        span.attributes['http.request.body.size'],
+        '13',
+        `attribute 'http.request.body.size' is wrong`
       );
     });
   });

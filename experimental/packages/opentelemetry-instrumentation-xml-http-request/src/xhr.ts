@@ -52,7 +52,11 @@ import { AttributeNames } from './enums/AttributeNames';
 // hard to say how long it should really wait, seems like 300ms is
 // safe enough
 const OBSERVER_WAIT_TIME_MS = 300;
-
+const ERROR_EVENTS: { [key in EventNames]?: string } = {
+  [EventNames.EVENT_TIMEOUT]: 'xhr request timeout',
+  [EventNames.EVENT_ABORT]: 'xhr request abort',
+  [EventNames.EVENT_ERROR]: 'xhr request error',
+};
 export type XHRCustomAttributeFunction = (
   span: api.Span,
   xhr: XMLHttpRequest
@@ -101,7 +105,7 @@ export class XMLHttpRequestInstrumentation extends InstrumentationBase<XMLHttpRe
     super('@opentelemetry/instrumentation-xml-http-request', VERSION, config);
   }
 
-  init() {}
+  init() { }
 
   /**
    * Adds custom headers to XMLHttpRequest
@@ -422,7 +426,7 @@ export class XMLHttpRequestInstrumentation extends InstrumentationBase<XMLHttpRe
       plugin._clearResources();
     }
 
-    function endSpan(eventName: string, xhr: XMLHttpRequest) {
+    function endSpan(eventName: EventNames, xhr: XMLHttpRequest) {
       const xhrMem = plugin._xhrMem.get(xhr);
       if (!xhrMem) {
         return;
@@ -432,6 +436,12 @@ export class XMLHttpRequestInstrumentation extends InstrumentationBase<XMLHttpRe
       plugin._xhrMem.delete(xhr);
 
       if (xhrMem.span) {
+        if (ERROR_EVENTS.hasOwnProperty(eventName)) {
+          xhrMem.span.setStatus({
+            code: api.SpanStatusCode.ERROR,
+            message: ERROR_EVENTS[eventName],
+          });
+        }
         plugin._applyAttributesAfterXHR(xhrMem.span, xhr);
       }
       const performanceEndTime = hrTime();
