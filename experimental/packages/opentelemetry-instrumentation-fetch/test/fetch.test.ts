@@ -818,7 +818,7 @@ describe('fetch', () => {
   describe.only('when request is not mocked with POST with a body', () => {
 
     beforeEach(async () => {
-      const url = 'http://127.0.0.1:9876/test'
+      const url = 'http://127.0.0.1:1234/test'
       const body = JSON.stringify({ foo: 'bar' })
       const init = {
         method: 'POST',
@@ -827,19 +827,15 @@ describe('fetch', () => {
         },
         body,
       }
-
       await prepareData(url, {}, 'POST', false, false, true, init);
-      console.log('data prepared?')
     });
 
     afterEach(() => {
       clearData();
     });
 
-    it('should create a span with correct root span', () => {
-      console.log('creating root span?')
+    it('should create a span with http.request.body.size', () => {
       const span: tracing.ReadableSpan = exportSpy.args[1][0][0];
-      console.log('here???')
       assert.strictEqual(
         span.parentSpanId,
         rootSpan.spanContext().spanId,
@@ -847,7 +843,7 @@ describe('fetch', () => {
       );
       assert.strictEqual(
         span.attributes['http.request.body.size'],
-        '13',
+        13,
         `attribute 'http.request.body.size' is wrong`
       );
     });

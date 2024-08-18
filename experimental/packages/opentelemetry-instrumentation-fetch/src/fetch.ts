@@ -16,7 +16,6 @@
 
 import * as api from '@opentelemetry/api';
 import {
-  isWrapped,
   InstrumentationBase,
   InstrumentationConfig,
   safeExecuteInTheMiddle,
@@ -35,6 +34,9 @@ import {
 import { FetchError, FetchResponse, SpanData } from './types';
 import { VERSION } from './version';
 import { _globalThis } from '@opentelemetry/core';
+import { calculateRequestInitBodyLength } from './util';
+import { ByteCountingTransformer } from './transformer';
+import { PatchedRequest } from './request';
 
 // how long to wait for observer to collect information about resources
 // this is needed as event "load" is called before observer
@@ -76,6 +78,14 @@ export interface FetchInstrumentationConfig extends InstrumentationConfig {
   ignoreNetworkEvents?: boolean;
 }
 
+export interface PatchedRequestInterface extends Request {
+  byteLength: () => Promise<number | undefined>;
+}
+
+function isPatchedRequestInterface(request: Request): request is PatchedRequestInterface {
+  return 'byteLength' in request;
+}
+
 /**
  * This class represents a fetch plugin for auto instrumentation
  */
@@ -85,6 +95,7 @@ export class FetchInstrumentation extends InstrumentationBase<FetchInstrumentati
   moduleName = this.component;
   private _usedResources = new WeakSet<PerformanceResourceTiming>();
   private _tasksCount = 0;
+  private _originalRequest?: typeof Request;
 
   constructor(config: FetchInstrumentationConfig = {}) {
     super('@opentelemetry/instrumentation-fetch', VERSION, config);
@@ -303,92 +314,6 @@ export class FetchInstrumentation extends InstrumentationBase<FetchInstrumentati
     }, OBSERVER_WAIT_TIME_MS);
   }
 
-  private async _getRequestInitBodySize(init: RequestInit, transformer?: Transformer): Promise<number | undefined> {
-    let bytes: number | undefined = undefined;
-    let promise;
-    console.log('init', init);
-
-    if (init?.body instanceof ReadableStream && transformer) {
-      bytes = 0;
-      promise = new Promise((resolve, reject) => {
-        transformer.start = () => {
-          console.log('start');
-        }
-        transformer.transform = (chunk: any, controller: TransformStreamDefaultController) => {
-          console.log('chunk', chunk);
-          bytes += chunk.length;
-          return controller.enqueue(chunk);
-        }
-        transformer.flush = () => {
-          console.log('flush', bytes);
-          resolve(bytes);
-        }
-      })
-    } else if (init?.body instanceof Blob) {
-      console.log('blob size: ', init.body.size);
-      bytes = init.body.size;
-    } else if (init?.body instanceof ArrayBuffer) {
-      console.log('array buffer size: ', init.body.byteLength);
-      bytes = init.body.byteLength;
-    } else if (init?.body instanceof FormData) {
-      console.log('form data size: ', JSON.stringify(init.body.entries()).length);
-      bytes = Array.from(init.body.entries()).reduce((size, [name, value]) => size + (typeof value === 'string' ? value.length : value.size) + name.length, 0);
-    } else if (typeof init?.body === 'string') {
-      // TODO: wrong
-      console.log('string size: ', init.body.length);
-      bytes = init.body.length;
-    } else {
-      console.log('unknown body type: ', init?.body);
-    }
-
-    if (promise) {
-      return await promise as Promise<number | undefined>;
-    }
-    return bytes;
-  }
-
-  private _patchRequestConstructor(): (original: typeof Request) => typeof Request {
-    const plugin = this;
-    return (original) => {
-      class PatchedRequest extends original {
-        sizePromise?: Promise<number | undefined>;
-        requestSize?: number;
-
-        constructor(input: RequestInfo | URL, init?: RequestInit) {
-
-          let countBytesTransformer: Transformer = {};
-
-          // If the body is a stream, we need to count the bytes
-          // So we replace it with a transform stream that counts chunk bytes as they're read
-          if (init?.body instanceof ReadableStream) {
-            const { readable } = new TransformStream(countBytesTransformer);
-            init.body = readable;
-          }
-
-          // @ts-ignore
-          super(input, init);
-
-          if (init?.body) {
-            this.sizePromise = plugin._getRequestInitBodySize(init, countBytesTransformer)
-          } else {
-            this.sizePromise = input instanceof PatchedRequest ? input.getBodySize() : undefined;
-          }
-        }
-
-        async getBodySize(): Promise<number | undefined> {
-          if (this.sizePromise) {
-            const size = await this.sizePromise;
-            this.requestSize = size;
-            this.sizePromise = undefined;
-            return size;
-          }
-          return this.requestSize;
-        }
-      }
-      return PatchedRequest;
-    };
-  }
-
   /**
    * Patches the constructor of fetch
    */
@@ -412,13 +337,25 @@ export class FetchInstrumentation extends InstrumentationBase<FetchInstrumentati
         }
 
         if (options instanceof Request) {
-          console.log(options);
-          // @ts-ignore
-          options.getBodySize().then((size) => {
-            console.log('have size', size);
-            createdSpan.setAttribute('http.request.body.size', size);
+          if (isPatchedRequestInterface(options)) {
+
+            options.byteLength().then((size) => {
+              size !== undefined && createdSpan.setAttribute('http.request.body.size', size);
+            })
+          } else {
+            plugin._diag.info('fetch received unpatched `Request` object, body size will not be calculated');
+          }
+        } else {
+          if (options.body instanceof ReadableStream) {
+            const { readable } = new ByteCountingTransformer();
+            options.body = readable;
+          }
+
+          calculateRequestInitBodyLength(options).then((size) => {
+            size !== undefined && createdSpan.setAttribute('http.request.body.size', size);
           })
         }
+
         const spanData = plugin._prepareSpanData(url);
 
         function endSpanOnError(span: api.Span, error: FetchError) {
@@ -574,17 +511,9 @@ export class FetchInstrumentation extends InstrumentationBase<FetchInstrumentati
       );
       return;
     }
-    if (isWrapped(fetch)) {
-      this._unwrap(_globalThis, 'fetch');
-      this._diag.debug('removing previous patch for constructor');
-    }
     this._wrap(_globalThis, 'fetch', this._patchFetchConstructor());
-
-    if (isWrapped(Request)) {
-      this._unwrap(_globalThis, 'Request');
-      this._diag.debug('removing previous patch for constructor');
-    }
-    this._wrap(_globalThis, 'Request', this._patchRequestConstructor());
+    this._originalRequest = _globalThis.Request;
+    _globalThis.Request = PatchedRequest;
   }
 
   /**
@@ -595,6 +524,9 @@ export class FetchInstrumentation extends InstrumentationBase<FetchInstrumentati
       return;
     }
     this._unwrap(_globalThis, 'fetch');
+    if (this._originalRequest) {
+      _globalThis.Request = this._originalRequest;
+    }
     this._usedResources = new WeakSet<PerformanceResourceTiming>();
   }
 }
