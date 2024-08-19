@@ -10,8 +10,17 @@ export class PatchedRequest extends Request {
         // So we replace it with a transform stream that counts chunks
         // We replace it before calling the super constructor, as afterwards the body is readonly
         if (init?.body instanceof ReadableStream) {
-            const { readable } = new ByteCountingTransformer();
-            init.body = readable;
+            const readable = init.body;
+
+            // Check if the stream is locked
+            if (!readable.locked) {
+                const transformer = new ByteCountingTransformer();
+                init.body = readable.pipeThrough(transformer);
+                // @ts-ignore
+                init.body.byteLength = async () => { return await transformer.byteLength() };
+            } else {
+                console.warn('Stream is already locked, cannot pipe through ByteCountingTransformer.');
+            }
         }
         // @ts-ignore
         super(input, init);

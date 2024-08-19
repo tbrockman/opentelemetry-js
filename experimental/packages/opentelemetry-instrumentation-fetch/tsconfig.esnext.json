@@ -3,7 +3,8 @@
   "compilerOptions": {
     "outDir": "build/esnext",
     "rootDir": "src",
-    "tsBuildInfoFile": "build/esnext/tsconfig.esnext.tsbuildinfo"
+    "tsBuildInfoFile": "build/esnext/tsconfig.esnext.tsbuildinfo",
+    "target": "ES6"
   },
   "include": [
     "src/**/*.ts"

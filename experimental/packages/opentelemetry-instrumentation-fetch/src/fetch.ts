@@ -346,9 +346,19 @@ export class FetchInstrumentation extends InstrumentationBase<FetchInstrumentati
             plugin._diag.info('fetch received unpatched `Request` object, body size will not be calculated');
           }
         } else {
+
           if (options.body instanceof ReadableStream) {
-            const { readable } = new ByteCountingTransformer();
-            options.body = readable;
+            const readable = options.body;
+
+            // Check if the stream is locked
+            if (!readable.locked) {
+              const transformer = new ByteCountingTransformer();
+              options.body = readable.pipeThrough(transformer);
+              // @ts-ignore
+              options.body.byteLength = async () => { return await transformer.byteLength() };
+            } else {
+              console.warn('Stream is already locked, cannot pipe through ByteCountingTransformer.');
+            }
           }
 
           calculateRequestInitBodyLength(options).then((size) => {

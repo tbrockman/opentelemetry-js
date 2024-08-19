@@ -2,7 +2,8 @@
   "extends": "../../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "build",
-    "rootDir": "."
+    "rootDir": ".",
+    "target": "ES6"
   },
   "files": [],
   "include": [

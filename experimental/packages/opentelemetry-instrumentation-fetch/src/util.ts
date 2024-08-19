@@ -1,5 +1,3 @@
-import { ByteCountingTransformer } from "./transformer";
-
 const TEXT_ENCODER = typeof TextEncoder == "function" ? new TextEncoder() : null;
 
 export async function calculateRequestInitBodyLength(init: RequestInit): Promise<number | undefined> {
@@ -8,8 +6,8 @@ export async function calculateRequestInitBodyLength(init: RequestInit): Promise
     if (!init.body) return bytes;
 
     if (init.body instanceof ReadableStream) {
-
-        if (init.body instanceof ByteCountingTransformer) {
+        if (init.body.hasOwnProperty('byteLength')) {
+            // @ts-ignore
             bytes = await init.body.byteLength();
         } else {
             console.error('`ReadableStream` body size cannot be determined without using a `ByteCountingTransformer`');
